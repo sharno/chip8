@@ -1,11 +1,15 @@
-const SCREEN_WIDTH: usize = 64;
-const SCREEN_HEIGHT: usize = 32;
+use std::default;
+
+pub const SCREEN_WIDTH: usize = 64;
+pub const SCREEN_HEIGHT: usize = 32;
 
 const RAM_SIZE: usize = 4096;
 const NUM_REGS: usize = 16;
 
 const STACK_SIZE: usize = 16;
 const NUM_KEYS: usize = 16;
+
+const START_ADDRESS: u16 = 0x200;
 
 pub struct Emu {
     pc: u16,
@@ -42,7 +46,6 @@ const FONTSET: [u8; FONTSET_SIZE] = [
     0xF0, 0x80, 0xF0, 0x80, 0x80, // F
 ];
 
-const START_ADDRESS: u16 = 0x200;
 impl Emu {
     pub fn new() -> Self {
         let mut emu = Emu {
@@ -88,8 +91,8 @@ impl Emu {
     pub fn tick(&mut self) {
         // fetch
         let op = self.fetch();
-        // decode
-        // execute
+        // decode and execute
+        self.execute(op);
     }
 
     fn fetch(&mut self) -> u16 {
@@ -100,7 +103,56 @@ impl Emu {
         op
     }
 
-    fn tick_timers(&mut self) {
+    fn execute(&mut self, op: u16) {
+        let digit1 = (op & 0xF000) >> 12;
+        let digit2 = (op & 0x0F00) >> 8;
+        let digit3 = (op & 0x00F0) >> 4;
+        let digit4 = (op & 0x000F);
+
+        match (digit1, digit2, digit3, digit4) {
+            (0, 0, 0, 0) => return,
+            (0, 0, 0xE, 0) => {
+                self.screen = [false; SCREEN_WIDTH * SCREEN_HEIGHT];
+            }
+            (0, 0, 0xE, 0xE) => {
+                let return_address = self.pop();
+                self.pc = return_address;
+            }
+            (0x1, _, _, _) => {
+                let nnn = op & 0xFFF;
+                self.pc = nnn;
+            }
+            (0x2, _, _, _) => {
+                let nnn = op & 0xFFF;
+                self.push(self.pc);
+                self.pc = nnn;
+            }
+            (0x3, _, _, _) => {
+                let x = digit2 as usize;
+                let nn = (op & 0xFF) as u8;
+                if self.v_reg[x] == nn {
+                    return;
+                }
+            }
+            (0x4, _, _, _) => {
+                let x = digit2 as usize;
+                let nn = (op & 0xFF) as u8;
+                if self.v_reg[x] != nn {
+                    return;
+                }
+            }
+            (0x5, _, _, 0x0) => {
+                let x = digit2 as usize;
+                let y = digit3 as usize;
+                if self.v_reg[x] == self.v_reg[y] {
+                    return;
+                }
+            }
+            default => unimplemented!("We didn't implement all the instructions yet"),
+        }
+    }
+
+    pub fn tick_timers(&mut self) {
         if self.dt > 0 {
             self.dt -= 1;
         }
@@ -111,5 +163,23 @@ impl Emu {
                 // beep
             }
         }
+    }
+
+    // frontend helpers
+    pub fn get_screen(&self) -> &[bool] {
+        return &self.screen;
+    }
+
+    pub fn key_press(&mut self, idx: usize, pressed: bool) {
+        if idx < NUM_KEYS {
+            return;
+        }
+        self.keys[idx] = pressed;
+    }
+
+    pub fn load(&mut self, data: &[u8]) {
+        let start_address = START_ADDRESS as usize;
+        let end_address = START_ADDRESS as usize + data.len();
+        self.ram[start_address..end_address].copy_from_slice(data);
     }
 }
