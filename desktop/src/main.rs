@@ -53,7 +53,7 @@ fn draw_screen(emu: &mut Emu, canvas: &mut Canvas<Window>) {
     canvas.set_draw_color(Color::RGB(0, 0, 0));
     canvas.clear();
 
-    let screen_buffer = emu.get_screen();
+    let screen_buffer = emu.get_display();
     canvas.set_draw_color(Color::RGB(255, 255, 255));
     for (i, pixel) in screen_buffer.iter().enumerate() {
         if *pixel {
@@ -63,4 +63,5 @@ fn draw_screen(emu: &mut Emu, canvas: &mut Canvas<Window>) {
             canvas.fill_rect(rect).unwrap();
         }
     }
+    canvas.present();
 }
