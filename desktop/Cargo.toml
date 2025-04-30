@@ -5,4 +5,4 @@ edition = "2021"
 
 [dependencies]
 core = { path = "../core" }
-sdl2 = "0.37.0"
+ggez = "0.9.3"

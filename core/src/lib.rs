@@ -1,5 +1,3 @@
-use std::default;
-
 use rand::random;
 
 pub const SCREEN_WIDTH: usize = 64;
@@ -16,7 +14,7 @@ const START_ADDRESS: u16 = 0x200;
 pub struct Emu {
     pc: u16,
     ram: [u8; RAM_SIZE],
-    screen: [bool; SCREEN_WIDTH * SCREEN_HEIGHT],
+    screen: [bool; SCREEN_WIDTH * SCREEN_HEIGHT], // true = pixel on, false = pixel off
     v_reg: [u8; NUM_REGS],
     i_reg: u16,
 
@@ -24,8 +22,8 @@ pub struct Emu {
     stack: [u16; STACK_SIZE],
     keys: [bool; NUM_KEYS],
 
-    dt: u8,
-    st: u8,
+    dt: u8, // Delay Timer
+    st: u8, // Sound Timer
 }
 
 const FONTSET_SIZE: usize = 80;
@@ -63,6 +61,7 @@ impl Emu {
             st: 0,
         };
 
+        // Load fontset into lower memory
         emu.ram[..FONTSET_SIZE].copy_from_slice(&FONTSET);
         emu
     }
@@ -107,241 +106,281 @@ impl Emu {
 
     fn execute(&mut self, op: u16) {
         let digit1 = (op & 0xF000) >> 12;
-        let digit2 = (op & 0x0F00) >> 8;
-        let digit3 = (op & 0x00F0) >> 4;
-        let digit4 = op & 0x000F;
+        let digit2 = (op & 0x0F00) >> 8; // Often the X register index
+        let digit3 = (op & 0x00F0) >> 4; // Often the Y register index
+        let digit4 = op & 0x000F; // Often the N value
+
+        let nnn = op & 0x0FFF; // 12-bit address
+        let nn = (op & 0x00FF) as u8; // 8-bit constant
+        let x = digit2 as usize; // Index for V registers
+        let y = digit3 as usize; // Index for V registers
+        let n = digit4 as usize; // 4-bit height / value
 
         match (digit1, digit2, digit3, digit4) {
+            // NOP (0000) - Often ignored, returning is fine
             (0, 0, 0, 0) => return,
+            // CLS (00E0) - Clear screen
             (0, 0, 0xE, 0) => {
                 self.screen = [false; SCREEN_WIDTH * SCREEN_HEIGHT];
             }
+            // RET (00EE) - Return from subroutine
             (0, 0, 0xE, 0xE) => {
                 let return_address = self.pop();
                 self.pc = return_address;
             }
+            // JP addr (1NNN) - Jump to address NNN
             (0x1, _, _, _) => {
-                let nnn = op & 0xFFF;
                 self.pc = nnn;
             }
+            // CALL addr (2NNN) - Call subroutine at NNN
             (0x2, _, _, _) => {
-                let nnn = op & 0xFFF;
-                self.push(self.pc);
+                self.push(self.pc); // Push current PC (which points *after* this instruction)
                 self.pc = nnn;
             }
+            // SE Vx, byte (3XNN) - Skip next instruction if Vx == NN
             (0x3, _, _, _) => {
-                let x = digit2 as usize;
-                let nn = (op & 0xFF) as u8;
                 if self.v_reg[x] == nn {
                     self.pc += 2;
                 }
             }
+            // SNE Vx, byte (4XNN) - Skip next instruction if Vx != NN
             (0x4, _, _, _) => {
-                let x = digit2 as usize;
-                let nn = (op & 0xFF) as u8;
                 if self.v_reg[x] != nn {
                     self.pc += 2;
                 }
             }
+            // SE Vx, Vy (5XY0) - Skip next instruction if Vx == Vy
             (0x5, _, _, 0x0) => {
-                let x = digit2 as usize;
-                let y = digit3 as usize;
                 if self.v_reg[x] == self.v_reg[y] {
                     self.pc += 2;
                 }
             }
+            // LD Vx, byte (6XNN) - Set Vx = NN
             (0x6, _, _, _) => {
-                let x = digit2 as usize;
-                let nn = (op & 0xFF) as u8;
                 self.v_reg[x] = nn;
             }
+            // ADD Vx, byte (7XNN) - Set Vx = Vx + NN (carry flag is NOT changed)
             (0x7, _, _, _) => {
-                let x = digit2 as usize;
-                let nn = (op & 0xFF) as u8;
                 self.v_reg[x] = self.v_reg[x].wrapping_add(nn);
             }
+            // LD Vx, Vy (8XY0) - Set Vx = Vy
             (0x8, _, _, 0x0) => {
-                let x = digit2 as usize;
-                let y = digit3 as usize;
                 self.v_reg[x] = self.v_reg[y];
             }
+            // OR Vx, Vy (8XY1) - Set Vx = Vx OR Vy
             (0x8, _, _, 0x1) => {
-                let x = digit2 as usize;
-                let y = digit3 as usize;
                 self.v_reg[x] |= self.v_reg[y];
             }
+            // AND Vx, Vy (8XY2) - Set Vx = Vx AND Vy
             (0x8, _, _, 0x2) => {
-                let x = digit2 as usize;
-                let y = digit3 as usize;
                 self.v_reg[x] &= self.v_reg[y];
             }
+            // XOR Vx, Vy (8XY3) - Set Vx = Vx XOR Vy
             (0x8, _, _, 0x3) => {
-                let x = digit2 as usize;
-                let y = digit3 as usize;
                 self.v_reg[x] ^= self.v_reg[y];
             }
+            // ADD Vx, Vy (8XY4) - Set Vx = Vx + Vy, set VF = carry
             (0x8, _, _, 0x4) => {
-                let x = digit2 as usize;
-                let y = digit3 as usize;
                 let (result, carry) = self.v_reg[x].overflowing_add(self.v_reg[y]);
-                let new_vf = if carry { 1 } else { 0 };
                 self.v_reg[x] = result;
-                self.v_reg[0xF] = new_vf;
+                self.v_reg[0xF] = if carry { 1 } else { 0 };
             }
+            // SUB Vx, Vy (8XY5) - Set Vx = Vx - Vy, set VF = NOT borrow
             (0x8, _, _, 0x5) => {
-                let x = digit2 as usize;
-                let y = digit3 as usize;
                 let (result, borrow) = self.v_reg[x].overflowing_sub(self.v_reg[y]);
-                let new_vf = if borrow { 0 } else { 1 };
                 self.v_reg[x] = result;
-                self.v_reg[0xF] = new_vf;
+                // VF is 1 if there was NO borrow, 0 if there was a borrow
+                self.v_reg[0xF] = if borrow { 0 } else { 1 };
             }
+            // SHR Vx {, Vy} (8XY6) - Set Vx = Vx SHR 1. VF = LSB of Vx before shift
             (0x8, _, _, 0x6) => {
-                let x = digit2 as usize;
-                let bit = self.v_reg[x] & 1;
+                let lsb = self.v_reg[x] & 1;
                 self.v_reg[x] >>= 1;
-                self.v_reg[0xF] = bit;
+                self.v_reg[0xF] = lsb;
             }
+            // SUBN Vx, Vy (8XY7) - Set Vx = Vy - Vx, set VF = NOT borrow
             (0x8, _, _, 0x7) => {
-                let x = digit2 as usize;
-                let y = digit3 as usize;
                 let (result, borrow) = self.v_reg[y].overflowing_sub(self.v_reg[x]);
-                let new_vf = if borrow { 0 } else { 1 };
                 self.v_reg[x] = result;
-                self.v_reg[0xF] = new_vf;
+                // VF is 1 if there was NO borrow, 0 if there was a borrow
+                self.v_reg[0xF] = if borrow { 0 } else { 1 };
             }
+            // SHL Vx {, Vy} (8XYE) - Set Vx = Vx SHL 1. VF = MSB of Vx before shift
             (0x8, _, _, 0xE) => {
-                let x = digit2 as usize;
-                let bit = (self.v_reg[x] >> 7) & 1;
+                let msb = (self.v_reg[x] >> 7) & 1;
                 self.v_reg[x] <<= 1;
-                self.v_reg[0xF] = bit;
+                self.v_reg[0xF] = msb;
             }
+            // SNE Vx, Vy (9XY0) - Skip next instruction if Vx != Vy
             (0x9, _, _, 0x0) => {
-                let x = digit2 as usize;
-                let y = digit3 as usize;
                 if self.v_reg[x] != self.v_reg[y] {
                     self.pc += 2;
                 }
             }
+            // LD I, addr (ANNN) - Set I = NNN
             (0xA, _, _, _) => {
-                let nnn = op & 0xFFF;
                 self.i_reg = nnn;
             }
+            // JP V0, addr (BNNN) - Jump to location NNN + V0
             (0xB, _, _, _) => {
-                let nnn = op & 0xFFF;
-                self.pc = self.v_reg[0] as u16 + nnn;
+                self.pc = (self.v_reg[0] as u16).wrapping_add(nnn);
             }
+            // RND Vx, byte (CXNN) - Set Vx = random byte AND NN
             (0xC, _, _, _) => {
-                let x = digit2 as usize;
-                let nn = (op & 0xFF) as u8;
                 let rng: u8 = random();
                 self.v_reg[x] = rng & nn;
             }
+            // DRW Vx, Vy, nibble (DXYN) - Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision
             (0xD, _, _, _) => {
-                let x = digit2 as usize;
-                let y = digit3 as usize;
-                let n = digit4;
-                let x_coord = self.v_reg[x] as u16;
-                let y_coord = self.v_reg[y] as u16;
+                // Get the coords (Vx, Vy) and wrap if necessary
+                let x_coord = self.v_reg[x] as usize % SCREEN_WIDTH;
+                let y_coord = self.v_reg[y] as usize % SCREEN_HEIGHT;
+                let num_rows = n;
 
-                let mut flipped = false;
-                for row in 0..n {
-                    let address = self.i_reg + row as u16;
-                    let pixels = self.ram[address as usize];
-                    for col in 0..8 {
-                        if (pixels & (0b1000_0000 >> col)) != 0 {
-                            let x = (x_coord + col) as usize % SCREEN_WIDTH;
-                            let y = (y_coord + row) as usize % SCREEN_HEIGHT;
+                // Assume no collision initially
+                self.v_reg[0xF] = 0;
 
-                            let idx = x + y * SCREEN_WIDTH;
+                // Iterate N rows
+                for row in 0..num_rows {
+                    // Stop drawing if bottom edge is reached
+                    let py = y_coord + row;
+                    if py >= SCREEN_HEIGHT {
+                        break;
+                    }
 
-                            flipped |= self.screen[idx];
-                            self.screen[idx] ^= true;
+                    // Get sprite byte from RAM[I + row]
+                    let sprite_byte = self.ram[(self.i_reg as usize + row) % RAM_SIZE]; // Ensure I doesn't wrap RAM
+
+                    // Iterate 8 bits/pixels in the sprite byte
+                    for bit in 0..8 {
+                        // Stop drawing if right edge is reached
+                        let px = x_coord + bit;
+                        if px >= SCREEN_WIDTH {
+                            break;
+                        }
+
+                        // Get the pixel bit (1 if sprite pixel is set, 0 otherwise)
+                        // Check if the leftmost bit (bit 7) of sprite_byte is set
+                        let sprite_pixel_is_on = (sprite_byte >> (7 - bit)) & 1;
+
+                        // Only draw if the sprite pixel is set
+                        if sprite_pixel_is_on != 0 {
+                            // Calculate screen buffer index
+                            let screen_idx = px + py * SCREEN_WIDTH;
+
+                            // Check for collision: if screen pixel is already on
+                            if self.screen[screen_idx] {
+                                self.v_reg[0xF] = 1; // Set VF flag for collision
+                            }
+                            // XOR the pixel state: on -> off, off -> on
+                            self.screen[screen_idx] ^= true;
                         }
                     }
                 }
-
-                let new_vf = if flipped { 1 } else { 0 };
-                self.v_reg[0xF] = new_vf;
+                // Optional: Indicate screen needs redraw
             }
+            // SKP Vx (EX9E) - Skip next instruction if key with the value of Vx is pressed
             (0xE, _, 0x9, 0xE) => {
-                let x = digit2 as usize;
-                let val_x = self.v_reg[x] as usize;
-                let key = self.keys[val_x];
-                if key {
+                let key_idx = self.v_reg[x] as usize;
+                if key_idx < NUM_KEYS && self.keys[key_idx] {
+                    // Check bounds and key state
                     self.pc += 2;
                 }
             }
+            // SKNP Vx (EXA1) - Skip next instruction if key with the value of Vx is NOT pressed
             (0xE, _, 0xA, 0x1) => {
-                let x = digit2 as usize;
-                let val_x = self.v_reg[x] as usize;
-                let key = self.keys[val_x];
-                if !key {
+                let key_idx = self.v_reg[x] as usize;
+                // Check bounds and key state
+                if key_idx >= NUM_KEYS || !self.keys[key_idx] {
                     self.pc += 2;
                 }
             }
+            // LD Vx, DT (FX07) - Set Vx = delay timer value
             (0xF, _, 0x0, 0x7) => {
-                let x = digit2 as usize;
                 self.v_reg[x] = self.dt;
             }
+            // LD Vx, K (FX0A) - Wait for a key press, store the value of the key in Vx
             (0xF, _, 0x0, 0xA) => {
-                let x = digit2 as usize;
-                let mut pressed = false;
-                for (i, key) in self.keys.iter().enumerate() {
-                    if *key {
-                        pressed = true;
+                let mut key_pressed = false;
+                for (i, key_state) in self.keys.iter().enumerate() {
+                    if *key_state {
                         self.v_reg[x] = i as u8;
-                        break;
+                        key_pressed = true;
+                        break; // Found first pressed key
                     }
                 }
-                if !pressed {
+                // If no key was pressed, repeat this instruction
+                if !key_pressed {
+                    // Decrement PC by 2 because fetch() already incremented it
                     self.pc -= 2;
                 }
             }
+            // LD DT, Vx (FX15) - Set delay timer = Vx
             (0xF, _, 0x1, 0x5) => {
-                let x = digit2 as usize;
                 self.dt = self.v_reg[x];
             }
+            // LD ST, Vx (FX18) - Set sound timer = Vx
             (0xF, _, 0x1, 0x8) => {
-                let x = digit2 as usize;
                 self.st = self.v_reg[x];
             }
+            // ADD I, Vx (FX1E) - Set I = I + Vx
             (0xF, _, 0x1, 0xE) => {
-                let x = digit2 as usize;
+                // CHIP-8 specs are ambiguous about I overflowing 0xFFF.
+                // Some emulators wrap I, some don't set VF, some set VF on overflow.
+                // Wrapping add is a common approach.
                 self.i_reg = self.i_reg.wrapping_add(self.v_reg[x] as u16);
+                // Optionally handle the undocumented overflow flag behavior if needed for specific games
+                // if self.i_reg < (self.v_reg[x] as u16) { /* handle overflow if required */ }
             }
+            // LD F, Vx (FX29) - Set I = location of sprite for digit Vx
             (0xF, _, 0x2, 0x9) => {
-                let x = digit2 as usize;
-                let c = self.v_reg[x] as u16;
-                self.i_reg = c * 5;
+                // Font characters are 5 bytes high. Assumes FONTSET starts at 0.
+                let digit = self.v_reg[x] as u16;
+                // Make sure digit is 0-F
+                self.i_reg = (digit & 0xF) * 5;
             }
+            // LD B, Vx (FX33) - Store BCD representation of Vx in memory locations I, I+1, and I+2
             (0xF, _, 0x3, 0x3) => {
-                let x = digit2 as usize;
-                let vx = self.v_reg[x] as f32;
+                let vx = self.v_reg[x]; // Get the value from Vx (u8)
 
-                let hundreds = (vx / 100.0).floor() as u8;
-                let tens = ((vx / 10.0) % 10.0).floor() as u8;
-                let ones = (vx % 10.0).floor() as u8;
+                let hundreds = vx / 100; // Integer division gives the hundreds digit
+                let tens = (vx / 10) % 10; // Get tens digit
+                let ones = vx % 10; // Get ones digit
 
-                self.ram[self.i_reg as usize] = hundreds;
-                self.ram[(self.i_reg + 1) as usize] = tens;
-                self.ram[(self.i_reg + 2) as usize] = ones;
+                // Ensure I is within bounds
+                let i = self.i_reg as usize;
+                if i + 2 < RAM_SIZE {
+                    self.ram[i] = hundreds;
+                    self.ram[i + 1] = tens;
+                    self.ram[i + 2] = ones;
+                } else {
+                    // Handle error: attempt to write BCD out of bounds
+                    // e.g., panic!("BCD write out of bounds"); or log an error
+                }
             }
+            // LD [I], Vx (FX55) - Store registers V0 through Vx in memory starting at location I
             (0xF, _, 0x5, 0x5) => {
-                let x = digit2 as usize;
                 let i = self.i_reg as usize;
-                for idx in 0..=x {
-                    self.ram[i + idx] = self.v_reg[idx];
+                // Ensure we don't write past RAM end
+                if i + x < RAM_SIZE {
+                    for idx in 0..=x {
+                        self.ram[i + idx] = self.v_reg[idx];
+                    }
+                } else {
+                    // Handle error: write out of bounds
                 }
             }
+            // LD Vx, [I] (FX65) - Read registers V0 through Vx from memory starting at location I
             (0xF, _, 0x6, 0x5) => {
-                let x = digit2 as usize;
                 let i = self.i_reg as usize;
-                for idx in 0..=x {
-                    self.v_reg[idx] = self.ram[i + idx];
+                // Ensure we don't read past RAM end
+                if i + x < RAM_SIZE {
+                    for idx in 0..=x {
+                        self.v_reg[idx] = self.ram[i + idx];
+                    }
                 }
             }
-            default => unimplemented!("We didn't implement all the instructions yet"),
+            _ => unimplemented!("We didn't implement all the instructions yet"),
         }
     }
 
@@ -364,7 +403,12 @@ impl Emu {
     }
 
     pub fn key_press(&mut self, idx: usize, pressed: bool) {
-        if idx < NUM_KEYS {
+        if idx >= NUM_KEYS {
+            eprintln!(
+                "Warning: Key index {} out of bounds (0-{})",
+                idx,
+                NUM_KEYS - 1
+            );
             return;
         }
         self.keys[idx] = pressed;
